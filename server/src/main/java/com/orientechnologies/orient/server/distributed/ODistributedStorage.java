@@ -93,6 +93,7 @@ import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.Callable;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
@@ -108,12 +109,17 @@ public class ODistributedStorage implements OStorage, OFreezableStorage, OAutosh
   protected final TimerTask                                                 purgeDeletedRecordsTask;
   protected final ConcurrentHashMap<ORecordId, OPair<Long, ORecordVersion>> deletedRecords  = new ConcurrentHashMap<ORecordId, OPair<Long, ORecordVersion>>();
   protected final AtomicLong                                                lastOperationId = new AtomicLong();
+  protected final AtomicInteger                                                lbIndex = new AtomicInteger();
 
-  protected final BlockingQueue<OAsynchDistributedOperation>                asynchronousOperationsQueue;
-  protected final Thread                                                    asynchWorker;
+  protected final BlockingQueue<OAsynchDistributedOperation>[]                asynchronousOperationsQueues;
+  protected final Thread[]                                                  asynchWorkers;
   protected volatile boolean                                                running         = true;
+  protected int threadCount;
 
   public ODistributedStorage(final OServer iServer, final OAbstractPaginatedStorage wrapped) {
+	this.threadCount = OGlobalConfiguration.DISTRIBUTED_REPLICATION_THREAD_COUNT.getValueAsInteger();
+	this.asynchronousOperationsQueues = new BlockingQueue[this.threadCount];
+	this.asynchWorkers = new Thread[this.threadCount];
     this.serverInstance = iServer;
     this.dManager = iServer.getDistributedManager();
     this.wrapped = wrapped;
@@ -152,24 +158,32 @@ public class ODistributedStorage implements OStorage, OFreezableStorage, OAutosh
         OGlobalConfiguration.DISTRIBUTED_PURGE_RESPONSES_TIMER_DELAY.getValueAsLong());
 
     final int queueSize = OGlobalConfiguration.DISTRIBUTED_ASYNCH_QUEUE_SIZE.getValueAsInteger();
-    if (queueSize <= 0)
-      asynchronousOperationsQueue = new LinkedBlockingQueue<OAsynchDistributedOperation>();
-    else
-      asynchronousOperationsQueue = new LinkedBlockingQueue<OAsynchDistributedOperation>(queueSize);
+    if (queueSize <= 0) {
+    	for (int i = 0; i < threadCount; i++) {
+    		asynchronousOperationsQueues[i] = new LinkedBlockingQueue<OAsynchDistributedOperation>();
+    	}
+    }
+    else {
+    	for (int i = 0; i < threadCount; i++) {
+    		asynchronousOperationsQueues[i] = new LinkedBlockingQueue<OAsynchDistributedOperation>(queueSize);
+    	}
+    }
 
-    asynchWorker = new Thread() {
+    for (int i = 0; i < threadCount; i++) {
+    final int index = i;
+    asynchWorkers[index] = new Thread() {
       @Override
       public void run() {
-        while (running || !asynchronousOperationsQueue.isEmpty()) {
+        while (running || !asynchronousOperationsQueues[index].isEmpty()) {
           try {
-            final OAsynchDistributedOperation operation = asynchronousOperationsQueue.take();
+            final OAsynchDistributedOperation operation = asynchronousOperationsQueues[index].take();
 
             dManager.sendRequest(operation.getDatabaseName(), operation.getClusterNames(), operation.getNodes(),
                 operation.getTask(), EXECUTION_MODE.NO_RESPONSE);
 
           } catch (InterruptedException e) {
 
-            final int pendingMessages = asynchronousOperationsQueue.size();
+            final int pendingMessages = asynchronousOperationsQueues[index].size();
             if (pendingMessages > 0)
               ODistributedServerLog.warn(this, dManager != null ? dManager.getLocalNodeName() : "?", null,
                   ODistributedServerLog.DIRECTION.NONE,
@@ -187,8 +201,9 @@ public class ODistributedStorage implements OStorage, OFreezableStorage, OAutosh
             ODistributedServerLog.DIRECTION.NONE, "Shutdown asynchronous queue worker completed");
       }
     };
-    asynchWorker.setName("OrientDB Distributed asynch ops node=" + getNodeId() + " db=" + getName());
-    asynchWorker.start();
+    asynchWorkers[index].setName("OrientDB Distributed asynch ops node=" + getNodeId() + " db=" + getName());
+    asynchWorkers[index].start();
+  }
   }
 
   @Override
@@ -1291,13 +1306,15 @@ public class ODistributedStorage implements OStorage, OFreezableStorage, OAutosh
   }
 
   public void shutdownAsynchronousWorker() {
-    running = false;
-    asynchWorker.interrupt();
-    try {
-      asynchWorker.join();
-    } catch (InterruptedException e) {
+    running = false;    
+    for(int i=0; i<threadCount; i++){
+    	asynchWorkers[i].interrupt();  
+    	try {
+    		asynchWorkers[i].join();
+    	} catch (InterruptedException e) {
+    	}
+    	asynchronousOperationsQueues[i].clear();
     }
-    asynchronousOperationsQueue.clear();
   }
 
   protected void checkNodeIsMaster(final String localNodeName, final ODistributedConfiguration dbCfg) {
@@ -1307,7 +1324,10 @@ public class ODistributedStorage implements OStorage, OFreezableStorage, OAutosh
   }
 
   protected void asynchronousExecution(final OAsynchDistributedOperation iOperation) {
-    asynchronousOperationsQueue.offer(iOperation);
+
+	    // Distribute asynchronous operation request among multiple threads in round-robin fashion
+	    int index = lbIndex.incrementAndGet() % threadCount;
+	    asynchronousOperationsQueues[index].offer(iOperation);
   }
 
   protected void handleDistributedException(final String iMessage, final Exception e, final Object... iParams) {

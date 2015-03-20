@@ -455,6 +455,9 @@ public enum OGlobalConfiguration {
   DISTRIBUTED_QUEUE_TIMEOUT("distributed.queueTimeout", "Maximum timeout in milliseconds to wait for the response in replication",
       Integer.class, 5000l),
 
+  DISTRIBUTED_REPLICATION_THREAD_COUNT("distributed.replicationThreadCount",
+      "Thread count to handle data replication", Integer.class, 1),
+
   DISTRIBUTED_ASYNCH_QUEUE_SIZE("distributed.asynchQueueSize",
       "Queue size to handle distributed asynchronous operations. 0 = dynamic allocation (up to 2^31-1 entries)", Integer.class, 0),
 

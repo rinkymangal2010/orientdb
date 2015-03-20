@@ -170,13 +170,14 @@ public class OHazelcastDistributedDatabase implements ODistributedDatabase {
         // TODO: CAN I MOVE THIS OUTSIDE?
         msgService.registerRequest(iRequest.getId(), currentResponseMgr);
 
-        for (IQueue<ODistributedRequest> queue : reqQueues) {
-          if (queue != null)
-            queue.offer(iRequest, timeout, TimeUnit.MILLISECONDS);
-        }
-
       } finally {
         requestLock.unlock();
+      }
+
+      // Do we really need it in requestLock? It is hazelcast's distributed queue
+      for (IQueue<ODistributedRequest> queue : reqQueues) {
+        if (queue != null)
+          queue.offer(iRequest, timeout, TimeUnit.MILLISECONDS);
       }
 
       if (ODistributedServerLog.isDebugEnabled())
@@ -218,9 +219,11 @@ public class OHazelcastDistributedDatabase implements ODistributedDatabase {
     setOnline();
 
     // CREATE 1 WORKER THREAD FOR INSERT (ONLY 1 TO MAINTAIN THE SEQUENCE OF REQUESTS)
-    ODistributedWorker listenerThread = new ODistributedWorker(this, requestQueue, databaseName, 0, false);
-    workers.add(listenerThread);
-    listenerThread.start();
+    for (int i = 0; i<OGlobalConfiguration.DISTRIBUTED_REPLICATION_THREAD_COUNT.getValueAsInteger(); i++) {
+    	ODistributedWorker listenerThread = new ODistributedWorker(this, requestQueue, databaseName, 0, false);
+    	workers.add(listenerThread);
+    	listenerThread.start();
+    }
 
     return this;
   }
